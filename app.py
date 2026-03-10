@@ -1,81 +1,78 @@
 import streamlit as st
 import pdfplumber
-import pandas as pd
 import re
+import pandas as pd
 
-st.set_page_config(page_title="Minato SBI Scorer", page_icon="🎯")
-st.markdown("<h1 style='text-align: center;'>🎯 Minato's SBI Clerk PDF Scorer</h1>", unsafe_allow_html=True)
+# --- MINATO BRANDING ---
+st.set_page_config(page_title="Minato SBI Clerk Scorer", layout="centered")
+st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🎯 SBI Clerk Mains Scorecard</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>Created by <b>Minato</b></p>", unsafe_allow_html=True)
+st.info("Simply download your response sheet as a PDF and upload it below. No special settings required.")
 
-def extract_flexible_data(pdf_file):
-    extracted = []
+def extract_sbi_marks(pdf_file):
+    data = []
     with pdfplumber.open(pdf_file) as pdf:
-        # We join all text to handle cases where a question is split across pages
+        # Extract text from every page and join it
         full_text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
     
-    # This splits the document by "Question No" or "Q." to isolate each question
-    blocks = re.split(r"(?:Question No\.|Q\.)\s*", full_text)
+    # Logic: Look for Question blocks. SBI sheets usually have "Question ID : 123456"
+    # This pattern catches the Question No, the Correct ID, and the Chosen ID
+    blocks = re.split(r"Question No\.", full_text)
     
     for block in blocks[1:]:
         try:
-            # 1. Find Question Number
-            q_match = re.search(r"(\d+)", block)
-            if not q_match: continue
-            q_no = int(q_match.group(1))
+            q_no = int(re.search(r"(\d+)", block).group(1))
             
-            # 2. Find Correct Answer (looks for 'Correct Answer', 'Answer Key', or 'Ans:')
-            # It captures A-E or 1-4
-            corr_match = re.search(r"(?:Correct Answer|Correct Option|Answer)\s*[:\-]\s*([A-E1-5])", block, re.I)
+            # Find the Correct Option ID (e.g., 'Correct Answer : 54321' or 'A')
+            correct = re.search(r"(?:Correct Answer|Correct Option)\s*[:\-]\s*(\w+)", block, re.I)
             
-            # 3. Find Candidate Choice (looks for 'Chosen Option', 'Your Answer')
-            chosen_match = re.search(r"(?:Chosen Option|Status|Marked)\s*[:\-]\s*([A-E1-5]|-|None|Not Attempted)", block, re.I)
+            # Find the Student's Chosen Option ID
+            chosen = re.search(r"(?:Chosen Option|Marked Option)\s*[:\-]\s*(\w+|-|None)", block, re.I)
             
-            if corr_match and chosen_match:
-                corr = corr_match.group(1).strip().upper()
-                chosen = chosen_match.group(1).strip().upper()
+            if correct and chosen:
+                c_val = correct.group(1).strip()
+                s_val = chosen.group(1).strip()
                 
-                # Normalize unattempted markers
-                if chosen in ["-", "NONE", "NOT ATTEMPTED", ""]:
-                    chosen = "$"
+                # Treat '-', 'None', or 'Null' as Unattempted
+                if s_val.lower() in ['-', 'none', 'null', 'not']:
+                    s_val = "$"
                 
-                extracted.append({"Question No": q_no, "Correct": corr, "Chosen": chosen})
+                data.append({"Q": q_no, "Correct": c_val, "Chosen": s_val})
         except:
             continue
-            
-    return pd.DataFrame(extracted)
+    return pd.DataFrame(data)
 
-# --- UPLOAD ---
-file = st.file_uploader("Upload Official SBI Response PDF", type="pdf")
+# --- UPLOAD SECTION ---
+uploaded_file = st.file_uploader("Upload your PDF here", type="pdf")
 
-if file:
-    with st.spinner("Minato is analyzing the paper..."):
-        df = extract_flexible_data(file)
-    
+if uploaded_file:
+    with st.spinner("Minato's bot is calculating your marks..."):
+        df = extract_sbi_marks(uploaded_file)
+        
     if not df.empty:
-        # Scoring Logic
-        def get_marks(row):
-            q, corr, ans = row['Question No'], row['Correct'], row['Chosen']
-            if ans == "$": return 0
-            # Reasoning 1.2 marks rule (Q141-190)
+        # Marking Rules
+        def score_row(row):
+            q, corr, chosen = row['Q'], row['Correct'], row['Chosen']
+            if chosen == "$": return 0
+            # Reasoning 1.2 weightage
             weight = 1.2 if 141 <= q <= 190 else 1.0
-            return weight if ans == corr else -0.25
+            return weight if chosen == corr else -0.25
 
-        df['Marks'] = df.apply(get_marks, axis=1)
+        df['Marks'] = df.apply(score_row, axis=1)
         
-        # Sectional Grouping
-        sections = {"GA (1-50)": (1,50), "English (51-90)": (51,90), "Quant (91-140)": (141,140), "Reasoning (141-190)": (141,190)}
+        # Display Final Summary
+        total = round(df['Marks'].sum(), 2)
+        st.success(f"## Your Total Score: {total} / 200")
         
-        st.subheader("Your Results")
-        total_score = df['Marks'].sum()
-        st.metric("FINAL SCORE", f"{round(total_score, 2)} / 200")
-        
-        # Show breakdown
-        st.write("Section-wise Summary:")
+        # Sectional Breakdown
+        sections = {"GA": (1,50), "English": (51,90), "Quant": (91,140), "Reasoning": (141,190)}
         summary = []
         for name, (s, e) in sections.items():
-            sec_df = df[(df['Question No'] >= s) & (df['Question No'] <= e)]
+            sec_df = df[(df['Q'] >= s) & (df['Q'] <= e)]
             summary.append({"Section": name, "Attempted": len(sec_df[sec_df['Chosen'] != "$"]), "Score": round(sec_df['Marks'].sum(), 2)})
+        
         st.table(pd.DataFrame(summary))
     else:
-        st.error("Minato could not find the question data. Try saving the PDF again with 'Background Graphics' enabled.")
+        st.error("Error: Could not find question data. Please ensure this is an official SBI Response PDF.")
 
-st.markdown("<p style='text-align: right; color: gray;'>Created by Minato</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: right; font-size: 12px; color: gray;'>Powered by Minato</p>", unsafe_allow_html=True)

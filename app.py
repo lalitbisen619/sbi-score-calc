@@ -83,7 +83,8 @@ if file:
         st.success(f"## Total Score: {round(df['Marks'].sum(), 2)} / 200")
         
         summary = []
-        for name, (s, e) in sections.items():                       sec_df = df[(df['Q'] >= s) & (df['Q'] <= e)]
+        for name, (s, e) in sections.items():                       
+            sec_df = df[(df['Q'] >= s) & (df['Q'] <= e)]
             summary.append({
                 "Section": name, 
                 "Attempted": len(sec_df[sec_df['Chosen'] != '$']),

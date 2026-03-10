@@ -3,78 +3,79 @@ import pdfplumber
 import pandas as pd
 import re
 
-# --- BRANDING ---
 st.set_page_config(page_title="Minato SBI Scorer", page_icon="🎯")
-st.markdown("<h1 style='text-align: center;'>🎯 SBI Clerk Mains PDF Scorer</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Created by <b>Minato</b></p>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🎯 Minato's SBI Clerk PDF Scorer</h1>", unsafe_allow_html=True)
 
-def extract_sbi_data(pdf_file):
-    all_text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            all_text += page.extract_text() + "\n"
-    
-    # NEW SMART REGEX: This finds Question IDs and Choices more flexibly
-    # It looks for "Question No" followed by digits, and "Chosen Option" / "Correct"
+def extract_flexible_data(pdf_file):
     extracted = []
+    with pdfplumber.open(pdf_file) as pdf:
+        # We join all text to handle cases where a question is split across pages
+        full_text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
     
-    # We split the text by "Question No" to analyze each question block
-    blocks = re.split(r"Question No\.", all_text)
+    # This splits the document by "Question No" or "Q." to isolate each question
+    blocks = re.split(r"(?:Question No\.|Q\.)\s*", full_text)
     
-    for block in blocks[1:]: # Skip the first empty split
+    for block in blocks[1:]:
         try:
-            q_no = int(re.search(r"(\d+)", block).group(1))
+            # 1. Find Question Number
+            q_match = re.search(r"(\d+)", block)
+            if not q_match: continue
+            q_no = int(q_match.group(1))
             
-            # Find Correct Answer (Usually looks like 'Correct Answer : A' or 'Option 1')
-            correct_match = re.search(r"Correct Answer\s*[:\-]\s*([A-E1-4])", block, re.I)
-            # Find Student Choice (Usually looks like 'Chosen Option : 2' or 'Chosen Option : --')
-            chosen_match = re.search(r"Chosen Option\s*[:\-]\s*([A-E1-4]|-|\$|None)", block, re.I)
+            # 2. Find Correct Answer (looks for 'Correct Answer', 'Answer Key', or 'Ans:')
+            # It captures A-E or 1-4
+            corr_match = re.search(r"(?:Correct Answer|Correct Option|Answer)\s*[:\-]\s*([A-E1-5])", block, re.I)
             
-            if correct_match and chosen_match:
-                correct = correct_match.group(1).upper()
-                chosen = chosen_match.group(1).upper()
+            # 3. Find Candidate Choice (looks for 'Chosen Option', 'Your Answer')
+            chosen_match = re.search(r"(?:Chosen Option|Status|Marked)\s*[:\-]\s*([A-E1-5]|-|None|Not Attempted)", block, re.I)
+            
+            if corr_match and chosen_match:
+                corr = corr_match.group(1).strip().upper()
+                chosen = chosen_match.group(1).strip().upper()
                 
-                # Handle unattempted cases
-                if chosen in ["-", "NONE", "$"]:
+                # Normalize unattempted markers
+                if chosen in ["-", "NONE", "NOT ATTEMPTED", ""]:
                     chosen = "$"
                 
-                extracted.append([q_no, correct, chosen])
+                extracted.append({"Question No": q_no, "Correct": corr, "Chosen": chosen})
         except:
             continue
             
-    return pd.DataFrame(extracted, columns=['Question No', 'Correct Answer', 'Candidate Response'])
+    return pd.DataFrame(extracted)
 
-# --- APP INTERFACE ---
-uploaded_pdf = st.file_uploader("Upload your Response PDF", type="pdf")
+# --- UPLOAD ---
+file = st.file_uploader("Upload Official SBI Response PDF", type="pdf")
 
-if uploaded_pdf:
-    df = extract_sbi_data(uploaded_pdf)
+if file:
+    with st.spinner("Minato is analyzing the paper..."):
+        df = extract_flexible_data(file)
     
     if not df.empty:
-        # Rules logic (Same as requested)
-        def scoring(row):
-            q, corr, ans = row['Question No'], row['Correct Answer'], row['Candidate Response']
-            if ans == "$": return 0, 0, 0, 1
+        # Scoring Logic
+        def get_marks(row):
+            q, corr, ans = row['Question No'], row['Correct'], row['Chosen']
+            if ans == "$": return 0
+            # Reasoning 1.2 marks rule (Q141-190)
             weight = 1.2 if 141 <= q <= 190 else 1.0
-            if ans == corr: return weight, weight, 0, 0
-            else: return -0.25, 0, 0.25, 0
+            return weight if ans == corr else -0.25
 
-        df[['Score', 'Pos', 'Neg', 'Un']] = df.apply(scoring, axis=1, result_type='expand')
+        df['Marks'] = df.apply(get_marks, axis=1)
         
-        # Display Summary Table
-        sections = {"GA": (1,50), "English": (51,90), "Quant": (91,140), "Reasoning": (141,190)}
+        # Sectional Grouping
+        sections = {"GA (1-50)": (1,50), "English (51-90)": (51,90), "Quant (91-140)": (141,140), "Reasoning (141-190)": (141,190)}
+        
+        st.subheader("Your Results")
+        total_score = df['Marks'].sum()
+        st.metric("FINAL SCORE", f"{round(total_score, 2)} / 200")
+        
+        # Show breakdown
+        st.write("Section-wise Summary:")
         summary = []
         for name, (s, e) in sections.items():
             sec_df = df[(df['Question No'] >= s) & (df['Question No'] <= e)]
-            summary.append({
-                "Section": name, 
-                "Correct": len(sec_df[sec_df['Score'] > 0]),
-                "Wrong": len(sec_df[sec_df['Score'] < 0]),
-                "Marks": round(sec_df['Score'].sum(), 2)
-            })
-        
+            summary.append({"Section": name, "Attempted": len(sec_df[sec_df['Chosen'] != "$"]), "Score": round(sec_df['Marks'].sum(), 2)})
         st.table(pd.DataFrame(summary))
-        st.success(f"### FINAL SCORE: {round(df['Score'].sum(), 2)} / 200")
-        st.info(f"Analyzed {len(df)} questions found in PDF.")
     else:
-        st.error("Minato's bot couldn't find the answers. Please make sure you saved the 'Full Response Sheet' as a PDF.")
+        st.error("Minato could not find the question data. Try saving the PDF again with 'Background Graphics' enabled.")
+
+st.markdown("<p style='text-align: right; color: gray;'>Created by Minato</p>", unsafe_allow_html=True)
